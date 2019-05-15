@@ -1,0 +1,131 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport"
+          content="width=device-width, user-scalable=no, initial-scale=1.0, maximum-scale=1.0, minimum-scale=1.0">
+    <meta http-equiv="X-UA-Compatible" content="ie=edge">
+    <script src="https://cdn.bootcss.com/jquery/3.3.1/jquery.min.js"></script>
+    <title>分片上传文件</title>
+</head>
+<body>
+<input type="file" id="file">
+<button id="upload" class="on">上传</button>
+<span id="output" style="font-size: 12px;">等待</span>
+<script>
+    var pieceFile = {
+        shardSize : 2 * 1024 * 1024, // 以 2M 为一个分片
+        succeed : 0, //成功分片数
+        isComplete : 0, //是否上传完成
+        uploadIndex : 0, //当前分片起始位置
+        isOpen : false, //是否在上传中
+        _upload : function(file, name, size, shardCount, i){
+            // 计算每一片的起始和结束的位置
+            var start = this.shardSize * i,
+                end = Math.min(start + this.shardSize, size),  // 获取较小值，最后一片的大小可能小于 this.shardSize;
+                _this = this;
+            // 构造一个表单， FormData 是 H5 新增的
+            var form = new FormData();
+            form.append('data', file.slice(start, end)); // 用 slice 函数切出文件的一部分
+            form.append('fileName', name); //文件名
+            form.append('totalSize', size);  // 文件总大小，不是分片文件的大小
+            form.append('chunkSize', this.shardSize);  // 每个分片大小
+            form.append('totalChunk', shardCount);  //分片总数
+            form.append('index', i + 1);  // 当前是第几片
+            // Ajax 提交
+            $.ajax({
+                url : 'upload.php',
+                dataType : "json",
+                type : "POST",
+                data : form,
+                async : true, // 异步
+                //很重要，告诉jquery不要对form进行处理
+                processData : false,  // 重要，用于对 data 参数进行序列化处理，默认为 true，发送的数据将被转换为对象，若不希望将 File 转换，设置为 false ，无此步会报错 Illegal invocation
+                contentType : false,  //重要，指定为false 才能形成正确的 Content-Type
+                success : function(data) {
+                    if (data.code == 1)
+                    {
+                        //全部上传完成
+                        _this.succeed = shardCount;
+                        _this.isComplete = 1;
+                        $('#upload').text("上传完成");
+                    } else if (data.code == 200)
+                    {
+                        // 分片上传完成
+                        _this.succeed = _this.succeed + 1;
+                    } else if (data.code == 400)
+                    {
+                        // 分片需要重新上传,加 if 条件，避免死循环时无法暂停只能刷新页面
+                        if (_this.isOpen)
+                        {
+                            _this._upload(file, name, size, shardCount, i);
+                        }
+                    }
+                    $('#output').text(_this.succeed + '/' + shardCount);
+                },
+                error : function(error)
+                {
+                    console.log(error);
+                }
+            });
+        },
+
+        upload : function(){
+            var file = $('#file')[0].files[0], //文件对象
+                name = file.name,
+                size = file.size,
+                _this = this,
+                // 总片数
+                shardCount = Math.ceil(size / this.shardSize),
+                settime = setInterval(function(){
+                    // 控制上传和暂停， _this.uploadIndex >= shardCount 避免定时器请求超过总分片数量的 ajax，因为ajax 是异步的；但是这样的话 400 死循环的时候暂停上传再次点击后无法开始新的上传，不过综合考虑影响不大
+                    if ((!_this.isOpen) || _this.succeed == shardCount || _this.uploadIndex >= shardCount)
+                    // console.log(55555);
+                    // console.log(_this.uploadIndex);  // 为什么选择下面的 if 条件，总分片 21， 上传完成之后 _this.uploadIndex 会成为 28，27，26，因为定时器每 100ms 执行一次，ajax 上传是异步执行，所以会有时间差，将 _this.uploadIndex = _this.uploadIndex + 1; 放到 ajax 执行完成后返回状态码为 200 里即可（这样无法避免发送过多的 ajax），或者 ajax 改为同步即可（目标是不要同步）
+                    // if ((!_this.isOpen) || _this.succeed == shardCount)
+                    {
+                        clearInterval(settime);
+                        return;
+                    }
+
+                    _this._upload(file, name, size, shardCount, _this.uploadIndex);
+                    // 避免定时器请求超过总分片数量的 ajax，因为ajax 是异步的；定时器每0.1 秒就会执行此处一次，_this.uploadIndex 就会加 1
+                    _this.uploadIndex = _this.uploadIndex + 1;
+                }, 100);  // 单位为毫秒
+        }
+    };
+
+    $(function(){
+       $('#file').change(function(){
+           pieceFile.isOpen = false; // 是否正在上传
+           $(this).text('等待');  // 没有什么明显的肉眼可见的效果
+           pieceFile.succeed = 0;  // 分片上传成功数
+           pieceFile.iscomplete = 0; // 文件是否全部上传完成
+           pieceFile.uploadIndex = 0; //当前分片位置
+       });
+       $('#upload').click(function(){
+           if ( !pieceFile.iscomplete )
+           {
+               // pieceFile.isOpen 不是 pieceFile.isopen
+               if (pieceFile.isOpen)
+               {
+                   pieceFile.isOpen = false;   // 点击暂停，
+                   $(this).text('暂停中');
+                   console.log('点击暂停');
+               } else {
+                   console.log('点击上传');
+                   pieceFile.isOpen = true;  // 点击上传，分片重新上传出现死循环的时候，为什么点击此处暂停不了，因为返回 400 错误码时，ajax 会死循环不停的发起请求，需要加强安全
+                   pieceFile.upload();
+                   $(this).text('上传中');
+               }
+
+           } else {
+               pieceFile.isOpen =false;
+               this.text('上传完成');
+           }
+       });
+    });
+
+</script>
+</body>
+</html>
